@@ -1,0 +1,83 @@
+id = "aarsh21.tab-title"
+name = "Tab Title"
+version = "0.1.0"
+min_herdr_version = "0.7.3"
+description = "Automatic tmux-like Herdr tab titles from the focused pane's process or directory"
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["sh", "scripts/install-binary.sh"]
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "start"
+title = "Start tab title watcher"
+contexts = ["workspace"]
+command = ["sh", "scripts/run.sh", "start"]
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "stop"
+title = "Stop tab title watcher"
+contexts = ["workspace"]
+command = ["sh", "scripts/run.sh", "stop"]
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "status"
+title = "Show tab title watcher status"
+contexts = ["workspace"]
+command = ["sh", "scripts/run.sh", "status"]
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "sync"
+title = "Sync tab titles once"
+contexts = ["workspace"]
+command = ["sh", "scripts/run.sh", "sync"]
+platforms = ["linux", "macos"]
+
+[[events]]
+on = "workspace.created"
+command = ["sh", "scripts/run.sh", "autostart"]
+platforms = ["linux", "macos"]
+
+[[events]]
+on = "workspace.focused"
+command = ["sh", "scripts/run.sh", "autostart"]
+platforms = ["linux", "macos"]
+
+[[events]]
+on = "tab.created"
+command = ["sh", "scripts/run.sh", "autostart"]
+platforms = ["linux", "macos"]
+
+[[events]]
+on = "tab.focused"
+command = ["sh", "scripts/run.sh", "autostart"]
+platforms = ["linux", "macos"]
+
+[[events]]
+on = "tab.moved"
+command = ["sh", "scripts/run.sh", "autostart"]
+platforms = ["linux", "macos"]
+
+[[events]]
+on = "pane.created"
+command = ["sh", "scripts/run.sh", "autostart"]
+platforms = ["linux", "macos"]
+
+[[events]]
+on = "pane.focused"
+command = ["sh", "scripts/run.sh", "autostart"]
+platforms = ["linux", "macos"]
+
+[[events]]
+on = "pane.moved"
+command = ["sh", "scripts/run.sh", "autostart"]
+platforms = ["linux", "macos"]
+
+[[events]]
+on = "pane.exited"
+command = ["sh", "scripts/run.sh", "autostart"]
+platforms = ["linux", "macos"]
