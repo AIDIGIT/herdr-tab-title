@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
-use std::io::Read;
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -36,6 +36,7 @@ struct Options {
 struct Paths {
     state_dir: PathBuf,
     pid_file: PathBuf,
+    start_lock_file: PathBuf,
     labels_file: PathBuf,
     log_file: PathBuf,
 }
@@ -182,6 +183,7 @@ impl Paths {
             .with_context(|| format!("create state directory {}", state_dir.display()))?;
         Ok(Self {
             pid_file: state_dir.join("watcher.pid"),
+            start_lock_file: state_dir.join("watcher.start.lock"),
             labels_file: state_dir.join("labels.json"),
             log_file: state_dir.join("watcher.log"),
             state_dir,
@@ -190,6 +192,23 @@ impl Paths {
 }
 
 fn start_watcher(paths: &Paths, options: Options) -> Result<()> {
+    if let Some(pid) = read_pid(&paths.pid_file)? {
+        if process_alive(pid) {
+            if !options.quiet {
+                println!("tab title watcher already running: pid {pid}");
+            }
+            return Ok(());
+        }
+        remove_if_exists(&paths.pid_file)?;
+    }
+
+    let Some(_guard) = StartLock::acquire(paths)? else {
+        if !options.quiet {
+            println!("tab title watcher already starting");
+        }
+        return Ok(());
+    };
+
     if let Some(pid) = read_pid(&paths.pid_file)? {
         if process_alive(pid) {
             if !options.quiet {
@@ -235,9 +254,14 @@ fn start_watcher(paths: &Paths, options: Options) -> Result<()> {
 }
 
 fn watch_loop(paths: &Paths, options: Options) -> Result<()> {
-    write_pid(&paths.pid_file, std::process::id())?;
+    let pid = std::process::id();
+    write_pid(&paths.pid_file, pid)?;
     let mut state = load_label_state(paths)?;
     loop {
+        if !process_owns_pid_file(paths, pid)? {
+            eprintln!("watcher exiting because another watcher became owner");
+            return Ok(());
+        }
         let started = Instant::now();
         match sync_once(&mut state, options.force) {
             Ok(_) => {
@@ -341,7 +365,11 @@ fn should_manage_tab(tab: &Tab, state: &LabelState, force: bool) -> bool {
     if let Some(last) = state.labels.get(&tab.tab_id) {
         return *last == tab.label;
     }
-    tab.label == tab.number.to_string()
+    looks_like_default_numeric_label(&tab.label)
+}
+
+fn looks_like_default_numeric_label(label: &str) -> bool {
+    !label.is_empty() && label.chars().all(|ch| ch.is_ascii_digit())
 }
 
 fn select_tab_source_pane<'a>(tab: &Tab, panes: &'a [Pane]) -> Result<Option<&'a Pane>> {
@@ -619,11 +647,69 @@ fn load_label_state(paths: &Paths) -> Result<LabelState> {
 }
 
 fn save_label_state(paths: &Paths, state: &LabelState) -> Result<()> {
-    let tmp = paths.labels_file.with_extension("json.tmp");
+    let filename = paths
+        .labels_file
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("labels.json");
+    let tmp = paths
+        .labels_file
+        .with_file_name(format!(".{filename}.{}.tmp", std::process::id()));
     let json = serde_json::to_vec_pretty(state)?;
     fs::write(&tmp, json).with_context(|| format!("write {}", tmp.display()))?;
     fs::rename(&tmp, &paths.labels_file)
         .with_context(|| format!("replace {}", paths.labels_file.display()))
+}
+
+fn process_owns_pid_file(paths: &Paths, pid: u32) -> Result<bool> {
+    Ok(read_pid(&paths.pid_file)?.is_some_and(|owner| owner == pid))
+}
+
+struct StartLock {
+    path: PathBuf,
+}
+
+impl StartLock {
+    fn acquire(paths: &Paths) -> Result<Option<Self>> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&paths.start_lock_file)
+            {
+                Ok(mut file) => {
+                    writeln!(file, "{}", std::process::id())
+                        .with_context(|| format!("write {}", paths.start_lock_file.display()))?;
+                    return Ok(Some(Self {
+                        path: paths.start_lock_file.clone(),
+                    }));
+                }
+                Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+                    if let Some(pid) = read_pid(&paths.pid_file)? {
+                        if process_alive(pid) {
+                            return Ok(None);
+                        }
+                    }
+                    if Instant::now() >= deadline {
+                        remove_if_exists(&paths.start_lock_file)?;
+                    } else {
+                        thread::sleep(Duration::from_millis(50));
+                    }
+                }
+                Err(err) => {
+                    return Err(err)
+                        .with_context(|| format!("create {}", paths.start_lock_file.display()));
+                }
+            }
+        }
+    }
+}
+
+impl Drop for StartLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 fn read_pid(path: &Path) -> Result<Option<u32>> {
@@ -761,6 +847,17 @@ mod tests {
         };
         assert!(!should_manage_tab(&manual, &state, false));
         assert!(should_manage_tab(&manual, &state, true));
+    }
+
+    #[test]
+    fn manual_name_policy_allows_compact_default_numeric_labels() {
+        let tab = Tab {
+            tab_id: "w1:t17".into(),
+            label: "6".into(),
+            number: 17,
+            focused: false,
+        };
+        assert!(should_manage_tab(&tab, &LabelState::default(), false));
     }
 
     #[test]
