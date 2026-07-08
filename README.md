@@ -30,6 +30,29 @@ Then reload Herdr config:
 herdr server reload-config
 ```
 
+## Configuration
+
+Plugin configuration lives in the directory printed by:
+
+```bash
+herdr plugin config-dir aarsh21.tab-title
+```
+
+Create or edit `config.toml` there:
+
+```toml
+directory_depth = 2
+show_tab_number = true
+```
+
+`directory_depth` controls how many trailing path components are shown when a
+pane is sitting at an idle shell. The default is `1`, so `/home/me/api` displays
+as `api`; `2` displays it as `me/api`. Foreground programs still win, so a pane
+running `vim` or `cargo` is titled `vim` or `cargo`.
+
+`show_tab_number` prefixes managed tab titles with the visual tab index used by
+`prefix+1..9`, such as `1:me/api`. It defaults to `false`.
+
 ## Actions
 
 ```bash

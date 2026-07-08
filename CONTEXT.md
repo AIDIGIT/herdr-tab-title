@@ -23,3 +23,11 @@ _Avoid_: automatic name
 **Manual Tab Label**:
 A tab label the user appears to have chosen directly. The plugin preserves manual labels unless explicitly forced.
 _Avoid_: custom name
+
+**Directory Depth**:
+The number of trailing cwd path components used when deriving a tab title from an idle shell. A depth of 1 uses only the leaf directory; a depth of 2 uses parent/leaf.
+_Avoid_: path length
+
+**Visual Tab Index**:
+The 1-based tab position shown in Herdr's tab bar and used by indexed navigation like prefix+1..9. This is distinct from Herdr's stable public tab number.
+_Avoid_: public tab number

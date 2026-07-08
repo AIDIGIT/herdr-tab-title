@@ -12,6 +12,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const DEFAULT_INTERVAL_SECS: u64 = 1;
+const DEFAULT_DIRECTORY_DEPTH: usize = 1;
+const MAX_DIRECTORY_DEPTH: usize = 8;
 const LABEL_LIMIT: usize = 40;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +37,8 @@ struct Options {
 #[derive(Debug, Clone)]
 struct Paths {
     state_dir: PathBuf,
+    config_dir: PathBuf,
+    config_file: PathBuf,
     pid_file: PathBuf,
     start_lock_file: PathBuf,
     labels_file: PathBuf,
@@ -44,8 +48,10 @@ struct Paths {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Tab {
     tab_id: String,
+    workspace_id: String,
     label: String,
     number: usize,
+    display_number: usize,
     focused: bool,
 }
 
@@ -71,6 +77,27 @@ struct LabelState {
     labels: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PluginConfig {
+    directory_depth: usize,
+    show_tab_number: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawPluginConfig {
+    directory_depth: Option<usize>,
+    show_tab_number: Option<bool>,
+}
+
+impl Default for PluginConfig {
+    fn default() -> Self {
+        Self {
+            directory_depth: DEFAULT_DIRECTORY_DEPTH,
+            show_tab_number: false,
+        }
+    }
+}
+
 fn main() {
     if let Err(err) = run() {
         eprintln!("herdr-tab-title: {err:#}");
@@ -93,7 +120,7 @@ fn run() -> Result<()> {
         CliCommand::Status => status(&paths),
         CliCommand::Sync(options) => {
             let mut state = load_label_state(&paths)?;
-            let changed = sync_once(&mut state, options.force)?;
+            let changed = sync_once(&paths, &mut state, options.force)?;
             save_label_state(&paths, &state)?;
             println!("synced {changed} tab(s)");
             Ok(())
@@ -179,9 +206,16 @@ impl Paths {
         let state_dir = env::var_os("HERDR_PLUGIN_STATE_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(".herdr-tab-title-state"));
+        let config_dir = env::var_os("HERDR_PLUGIN_CONFIG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| state_dir.join("config"));
         fs::create_dir_all(&state_dir)
             .with_context(|| format!("create state directory {}", state_dir.display()))?;
+        fs::create_dir_all(&config_dir)
+            .with_context(|| format!("create config directory {}", config_dir.display()))?;
         Ok(Self {
+            config_file: config_dir.join("config.toml"),
+            config_dir,
             pid_file: state_dir.join("watcher.pid"),
             start_lock_file: state_dir.join("watcher.start.lock"),
             labels_file: state_dir.join("labels.json"),
@@ -263,7 +297,7 @@ fn watch_loop(paths: &Paths, options: Options) -> Result<()> {
             return Ok(());
         }
         let started = Instant::now();
-        match sync_once(&mut state, options.force) {
+        match sync_once(paths, &mut state, options.force) {
             Ok(_) => {
                 if let Err(err) = save_label_state(paths, &state) {
                     eprintln!("failed to save label state: {err:#}");
@@ -307,10 +341,15 @@ fn status(paths: &Paths) -> Result<()> {
     let pid = read_pid(&paths.pid_file)?;
     let running = pid.is_some_and(process_alive);
     let state = load_label_state(paths).unwrap_or_default();
+    let config = load_plugin_config(paths)?;
     let payload = serde_json::json!({
         "running": running,
         "pid": pid,
         "managed_tabs": state.labels.len(),
+        "directory_depth": config.directory_depth,
+        "show_tab_number": config.show_tab_number,
+        "config_dir": paths.config_dir,
+        "config_file": paths.config_file,
         "state_dir": paths.state_dir,
         "log_file": paths.log_file,
     });
@@ -318,7 +357,8 @@ fn status(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-fn sync_once(state: &mut LabelState, force: bool) -> Result<usize> {
+fn sync_once(paths: &Paths, state: &mut LabelState, force: bool) -> Result<usize> {
+    let config = load_plugin_config(paths)?;
     let tabs = list_tabs()?;
     let panes = list_panes()?;
     let panes_by_tab = group_panes_by_tab(panes);
@@ -343,7 +383,7 @@ fn sync_once(state: &mut LabelState, force: bool) -> Result<usize> {
         let Some(source_pane) = select_tab_source_pane(&tab, tab_panes)? else {
             continue;
         };
-        let desired = desired_label_for_pane(source_pane)?;
+        let desired = desired_label_for_tab(&tab, source_pane, &config)?;
         if desired.is_empty() {
             continue;
         }
@@ -391,7 +431,12 @@ fn select_tab_source_pane<'a>(tab: &Tab, panes: &'a [Pane]) -> Result<Option<&'a
     Ok(Some(first))
 }
 
-fn desired_label_for_pane(pane: &Pane) -> Result<String> {
+fn desired_label_for_tab(tab: &Tab, pane: &Pane, config: &PluginConfig) -> Result<String> {
+    let base = desired_label_for_pane(pane, config)?;
+    Ok(format_tab_label(tab.display_number, &base, config))
+}
+
+fn desired_label_for_pane(pane: &Pane, config: &PluginConfig) -> Result<String> {
     let processes = pane_process_info(&pane.pane_id)?;
     if let Some(process) = select_foreground_process(&processes) {
         return Ok(sanitize_label(&process_label(process)));
@@ -402,7 +447,18 @@ fn desired_label_for_pane(pane: &Pane) -> Result<String> {
         .as_deref()
         .or(pane.cwd.as_deref())
         .unwrap_or("/");
-    Ok(sanitize_label(&directory_label(cwd)))
+    Ok(sanitize_label(&directory_label(
+        cwd,
+        config.directory_depth,
+    )))
+}
+
+fn format_tab_label(display_number: usize, base_label: &str, config: &PluginConfig) -> String {
+    if config.show_tab_number {
+        sanitize_label(&format!("{display_number}:{base_label}"))
+    } else {
+        base_label.to_string()
+    }
 }
 
 fn select_foreground_process(processes: &[ForegroundProcess]) -> Option<&ForegroundProcess> {
@@ -457,16 +513,18 @@ fn is_shell_process(process: &ForegroundProcess) -> bool {
     )
 }
 
-fn directory_label(path: &str) -> String {
+fn directory_label(path: &str, depth: usize) -> String {
     let trimmed = path.trim_end_matches(['/', '\\']);
-    let name = trimmed
-        .rsplit(['/', '\\'])
-        .find(|part| !part.is_empty())
-        .unwrap_or(trimmed);
-    if name.is_empty() {
+    let parts = trimmed
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
         "/".to_string()
     } else {
-        name.to_string()
+        let depth = depth.max(1);
+        let start = parts.len().saturating_sub(depth);
+        parts[start..].join("/")
     }
 }
 
@@ -512,16 +570,30 @@ fn list_tabs() -> Result<Vec<Tab>> {
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow!("tab list response missing result.tabs"))?;
 
-    tabs.iter()
+    let mut tabs = tabs
+        .iter()
         .map(|tab| {
             Ok(Tab {
                 tab_id: required_string(tab, "tab_id")?,
+                workspace_id: required_string(tab, "workspace_id")?,
                 label: required_string(tab, "label")?,
                 number: required_u64(tab, "number")? as usize,
+                display_number: 0,
                 focused: optional_bool(tab, "focused"),
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut workspace_counts = HashMap::<String, usize>::new();
+    for tab in &mut tabs {
+        let count = workspace_counts
+            .entry(tab.workspace_id.clone())
+            .or_default();
+        *count += 1;
+        tab.display_number = *count;
+    }
+
+    Ok(tabs)
 }
 
 fn list_panes() -> Result<Vec<Pane>> {
@@ -644,6 +716,33 @@ fn load_label_state(paths: &Paths) -> Result<LabelState> {
         .read_to_string(&mut text)
         .with_context(|| format!("read {}", paths.labels_file.display()))?;
     serde_json::from_str(&text).with_context(|| format!("parse {}", paths.labels_file.display()))
+}
+
+fn load_plugin_config(paths: &Paths) -> Result<PluginConfig> {
+    if !paths.config_file.is_file() {
+        return Ok(PluginConfig::default());
+    }
+    let mut text = String::new();
+    File::open(&paths.config_file)
+        .with_context(|| format!("open {}", paths.config_file.display()))?
+        .read_to_string(&mut text)
+        .with_context(|| format!("read {}", paths.config_file.display()))?;
+    parse_plugin_config(&text).with_context(|| format!("parse {}", paths.config_file.display()))
+}
+
+fn parse_plugin_config(text: &str) -> Result<PluginConfig> {
+    let raw: RawPluginConfig = toml::from_str(text)?;
+    let mut config = PluginConfig::default();
+    if let Some(directory_depth) = raw.directory_depth {
+        if directory_depth == 0 || directory_depth > MAX_DIRECTORY_DEPTH {
+            bail!("directory_depth must be between 1 and {MAX_DIRECTORY_DEPTH}");
+        }
+        config.directory_depth = directory_depth;
+    }
+    if let Some(show_tab_number) = raw.show_tab_number {
+        config.show_tab_number = show_tab_number;
+    }
+    Ok(config)
 }
 
 fn save_label_state(paths: &Paths, state: &LabelState) -> Result<()> {
@@ -781,9 +880,62 @@ mod tests {
 
     #[test]
     fn directory_label_uses_last_path_component() {
-        assert_eq!(directory_label("/home/me/project"), "project");
-        assert_eq!(directory_label("/home/me/project/"), "project");
-        assert_eq!(directory_label("/"), "/");
+        assert_eq!(directory_label("/home/me/project", 1), "project");
+        assert_eq!(directory_label("/home/me/project/", 1), "project");
+        assert_eq!(directory_label("/", 1), "/");
+    }
+
+    #[test]
+    fn directory_label_uses_requested_tail_components() {
+        assert_eq!(directory_label("/home/me/project", 2), "me/project");
+        assert_eq!(directory_label("/home/me/project", 99), "home/me/project");
+        assert_eq!(directory_label("C:\\Users\\me\\project", 2), "me/project");
+    }
+
+    #[test]
+    fn plugin_config_controls_directory_depth() {
+        assert_eq!(PluginConfig::default().directory_depth, 1);
+        assert!(!PluginConfig::default().show_tab_number);
+        assert_eq!(parse_plugin_config("").unwrap().directory_depth, 1);
+        assert_eq!(
+            parse_plugin_config("directory_depth = 2")
+                .unwrap()
+                .directory_depth,
+            2
+        );
+        assert!(parse_plugin_config("directory_depth = 0").is_err());
+        assert!(parse_plugin_config("directory_depth = 99").is_err());
+    }
+
+    #[test]
+    fn plugin_config_controls_tab_number_prefix() {
+        assert!(
+            parse_plugin_config("show_tab_number = true")
+                .unwrap()
+                .show_tab_number
+        );
+        assert_eq!(
+            format_tab_label(
+                3,
+                "me/project",
+                &PluginConfig {
+                    directory_depth: 2,
+                    show_tab_number: true,
+                },
+            ),
+            "3:me/project"
+        );
+        assert_eq!(
+            format_tab_label(
+                3,
+                "me/project",
+                &PluginConfig {
+                    directory_depth: 2,
+                    show_tab_number: false,
+                },
+            ),
+            "me/project"
+        );
     }
 
     #[test]
@@ -827,8 +979,10 @@ mod tests {
     fn manual_name_policy_allows_default_or_last_managed_label() {
         let tab = Tab {
             tab_id: "w1:t1".into(),
+            workspace_id: "w1".into(),
             label: "1".into(),
             number: 1,
+            display_number: 1,
             focused: false,
         };
         let mut state = LabelState::default();
@@ -853,8 +1007,10 @@ mod tests {
     fn manual_name_policy_allows_compact_default_numeric_labels() {
         let tab = Tab {
             tab_id: "w1:t17".into(),
+            workspace_id: "w1".into(),
             label: "6".into(),
             number: 17,
+            display_number: 6,
             focused: false,
         };
         assert!(should_manage_tab(&tab, &LabelState::default(), false));
