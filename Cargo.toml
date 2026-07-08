@@ -1,6 +1,6 @@
 [package]
 name = "herdr-tab-title"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Automatic tmux-like tab titles for Herdr"
 license = "MIT"

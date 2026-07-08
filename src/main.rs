@@ -492,7 +492,7 @@ fn strip_tab_number_prefix(label: &str) -> &str {
 fn select_foreground_process(processes: &[ForegroundProcess]) -> Option<&ForegroundProcess> {
     processes
         .iter()
-        .filter(|process| !is_shell_process(process))
+        .filter(|process| !is_shell_process(process) && !is_internal_helper_process(process))
         .max_by_key(|process| process_score(process))
 }
 
@@ -539,6 +539,16 @@ fn is_shell_process(process: &ForegroundProcess) -> bool {
             | "powershell"
             | "cmd"
     )
+}
+
+fn is_internal_helper_process(process: &ForegroundProcess) -> bool {
+    let name = process_label(process)
+        .trim()
+        .trim_end_matches(".exe")
+        .trim_end_matches(".cmd")
+        .trim_end_matches(".bat")
+        .to_lowercase();
+    matches!(name.as_str(), "exec_bridge")
 }
 
 fn directory_label(path: &str, depth: usize) -> String {
@@ -1024,6 +1034,22 @@ mod tests {
         assert_eq!(
             select_foreground_process(&processes).map(process_label),
             Some("cargo".to_string())
+        );
+    }
+
+    #[test]
+    fn select_foreground_process_skips_internal_helpers() {
+        let processes = vec![
+            process("pi", None, &["pi"]),
+            process(
+                "exec_bridge",
+                Some("/tmp/pi/tools/exec/bin/linux-x64/exec_bridge"),
+                &["/tmp/pi/tools/exec/bin/linux-x64/exec_bridge"],
+            ),
+        ];
+        assert_eq!(
+            select_foreground_process(&processes).map(process_label),
+            Some("pi".to_string())
         );
     }
 
