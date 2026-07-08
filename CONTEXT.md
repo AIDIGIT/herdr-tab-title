@@ -21,7 +21,7 @@ A tab label last set by the plugin and therefore safe for the plugin to update a
 _Avoid_: automatic name
 
 **Manual Tab Label**:
-A tab label the user appears to have chosen directly. The plugin preserves manual labels unless explicitly forced.
+A tab label the user appears to have chosen directly. The plugin preserves manual label text unless explicitly forced, but may normalize display chrome such as the visual tab index prefix.
 _Avoid_: custom name
 
 **Directory Depth**:

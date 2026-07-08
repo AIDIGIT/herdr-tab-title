@@ -1,6 +1,6 @@
 id = "aarsh21.tab-title"
 name = "Tab Title"
-version = "0.1.2"
+version = "0.1.3"
 min_herdr_version = "0.7.3"
 description = "Automatic tmux-like Herdr tab titles from the focused pane's process or directory"
 platforms = ["linux", "macos"]

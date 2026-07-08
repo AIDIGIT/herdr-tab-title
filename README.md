@@ -50,8 +50,9 @@ pane is sitting at an idle shell. The default is `1`, so `/home/me/api` displays
 as `api`; `2` displays it as `me/api`. Foreground programs still win, so a pane
 running `vim` or `cargo` is titled `vim` or `cargo`.
 
-`show_tab_number` prefixes managed tab titles with the visual tab index used by
-`prefix+1..9`, such as `1:me/api`. It defaults to `false`.
+`show_tab_number` prefixes tab titles with the visual tab index used by
+`prefix+1..9`, such as `1:me/api`. Manual titles keep their text and get the
+same prefix. It defaults to `false`.
 
 ## Actions
 

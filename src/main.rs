@@ -378,6 +378,11 @@ fn sync_once(paths: &Paths, state: &mut LabelState, force: bool) -> Result<usize
         let manage = should_manage_tab(&tab, state, force);
         if !manage {
             state.labels.remove(&tab.tab_id);
+            if let Some(desired) = desired_label_for_manual_tab(&tab, &config) {
+                rename_tab(&tab.tab_id, &desired)
+                    .with_context(|| format!("rename manual tab {} to {desired:?}", tab.tab_id))?;
+                changed += 1;
+            }
             continue;
         }
         let Some(source_pane) = select_tab_source_pane(&tab, tab_panes)? else {
@@ -436,6 +441,18 @@ fn desired_label_for_tab(tab: &Tab, pane: &Pane, config: &PluginConfig) -> Resul
     Ok(format_tab_label(tab.display_number, &base, config))
 }
 
+fn desired_label_for_manual_tab(tab: &Tab, config: &PluginConfig) -> Option<String> {
+    if !config.show_tab_number {
+        return None;
+    }
+    let desired = format_tab_label(
+        tab.display_number,
+        strip_tab_number_prefix(&tab.label),
+        config,
+    );
+    (desired != tab.label).then_some(desired)
+}
+
 fn desired_label_for_pane(pane: &Pane, config: &PluginConfig) -> Result<String> {
     let processes = pane_process_info(&pane.pane_id)?;
     if let Some(process) = select_foreground_process(&processes) {
@@ -458,6 +475,17 @@ fn format_tab_label(display_number: usize, base_label: &str, config: &PluginConf
         sanitize_label(&format!("{display_number}:{base_label}"))
     } else {
         base_label.to_string()
+    }
+}
+
+fn strip_tab_number_prefix(label: &str) -> &str {
+    let Some((prefix, rest)) = label.split_once(':') else {
+        return label;
+    };
+    if !prefix.is_empty() && prefix.chars().all(|ch| ch.is_ascii_digit()) {
+        rest.trim_start()
+    } else {
+        label
     }
 }
 
@@ -935,6 +963,38 @@ mod tests {
                 },
             ),
             "me/project"
+        );
+        assert_eq!(strip_tab_number_prefix("3:me/project"), "me/project");
+        assert_eq!(strip_tab_number_prefix("3: me/project"), "me/project");
+        assert_eq!(strip_tab_number_prefix("work:api"), "work:api");
+    }
+
+    #[test]
+    fn manual_titles_keep_text_but_get_visual_tab_number() {
+        let config = PluginConfig {
+            directory_depth: 2,
+            show_tab_number: true,
+        };
+        let manual = Tab {
+            tab_id: "w1:t2".into(),
+            workspace_id: "w1".into(),
+            label: "herdr sauce".into(),
+            number: 2,
+            display_number: 2,
+            focused: false,
+        };
+        assert_eq!(
+            desired_label_for_manual_tab(&manual, &config),
+            Some("2:herdr sauce".into())
+        );
+
+        let already_numbered = Tab {
+            label: "9:herdr sauce".into(),
+            ..manual
+        };
+        assert_eq!(
+            desired_label_for_manual_tab(&already_numbered, &config),
+            Some("2:herdr sauce".into())
         );
     }
 
