@@ -46,9 +46,9 @@ directory_depth = 2
 show_tab_number = true
 ```
 
-`interval_seconds` controls how often the watcher refreshes tab titles. The
-default is `10`, which keeps the plugin lightweight for normal use. Lower values
-make titles react faster but run more Herdr CLI queries.
+`interval_seconds` controls the fallback poll. Normal workspace, tab, and pane
+events trigger an immediate debounced sync, so titles update without waiting for
+the next poll. The default fallback is `10` seconds.
 
 `directory_depth` controls how many trailing path components are shown when a
 pane is sitting at an idle shell. The default is `1`, so `/home/me/api` displays
@@ -68,8 +68,9 @@ herdr plugin action invoke aarsh21.tab-title.status
 herdr plugin action invoke aarsh21.tab-title.sync
 ```
 
-The watcher refreshes titles every `interval_seconds`. It also self-starts from
-normal workspace, tab, and pane events after the plugin has been installed.
+The watcher refreshes titles immediately from normal workspace, tab, and pane
+events, with a 250ms debounce for event bursts. It also runs a fallback refresh
+every `interval_seconds`.
 
 ## Manual Tab Names
 
@@ -93,6 +94,6 @@ herdr plugin link .
 herdr plugin action invoke aarsh21.tab-title.start
 ```
 
-Local `plugin link` does not run build steps. The manifest commands go through
-`scripts/run.sh`, which uses `bin/herdr-tab-title` when present and otherwise
-falls back to `cargo run --release`.
+Local `plugin link` does not run build steps. Run `cargo build --release` and
+copy the binary to `bin/herdr-tab-title`, or run `scripts/install-binary.sh`,
+before linking.

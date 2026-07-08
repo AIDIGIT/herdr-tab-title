@@ -13,6 +13,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 const DEFAULT_INTERVAL_SECS: u64 = 10;
 const MAX_INTERVAL_SECS: u64 = 3600;
+const EVENT_SYNC_DEBOUNCE_MS: u64 = 250;
+const SYNC_LOCK_STALE_SECS: u64 = 30;
 const DEFAULT_DIRECTORY_DEPTH: usize = 1;
 const MAX_DIRECTORY_DEPTH: usize = 8;
 const LABEL_LIMIT: usize = 40;
@@ -42,6 +44,8 @@ struct Paths {
     config_file: PathBuf,
     pid_file: PathBuf,
     start_lock_file: PathBuf,
+    sync_lock_file: PathBuf,
+    event_sync_stamp_file: PathBuf,
     labels_file: PathBuf,
     log_file: PathBuf,
 }
@@ -114,20 +118,18 @@ fn run() -> Result<()> {
     let paths = Paths::new()?;
 
     match command {
-        CliCommand::Start(options) => start_watcher(&paths, options),
+        CliCommand::Start(options) => start_watcher(&paths, options).map(|_| ()),
         CliCommand::Autostart(mut options) => {
             options.quiet = true;
-            start_watcher(&paths, options)
+            autostart(&paths, options)
         }
         CliCommand::Watch(options) => watch_loop(&paths, options),
         CliCommand::Stop => stop_watcher(&paths),
         CliCommand::Status => status(&paths),
         CliCommand::Sync(options) => {
-            let mut state = load_label_state(&paths)?;
-            let previous_state = state.clone();
-            let config = load_plugin_config(&paths)?;
-            let changed = sync_once(&config, &mut state, options.force)?;
-            save_label_state_if_changed(&paths, &previous_state, &state)?;
+            let _guard = SyncLock::acquire(&paths, Duration::from_secs(2))?
+                .ok_or_else(|| anyhow!("another tab title sync is already running"))?;
+            let changed = sync_now(&paths, options.force)?;
             println!("synced {changed} tab(s)");
             Ok(())
         }
@@ -224,6 +226,8 @@ impl Paths {
             config_dir,
             pid_file: state_dir.join("watcher.pid"),
             start_lock_file: state_dir.join("watcher.start.lock"),
+            sync_lock_file: state_dir.join("sync.lock"),
+            event_sync_stamp_file: state_dir.join("event-sync.stamp"),
             labels_file: state_dir.join("labels.json"),
             log_file: state_dir.join("watcher.log"),
             state_dir,
@@ -231,13 +235,32 @@ impl Paths {
     }
 }
 
-fn start_watcher(paths: &Paths, options: Options) -> Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatcherStart {
+    Started,
+    AlreadyRunning,
+    AlreadyStarting,
+}
+
+fn autostart(paths: &Paths, options: Options) -> Result<()> {
+    match start_watcher(paths, options.clone())? {
+        WatcherStart::Started | WatcherStart::AlreadyStarting => Ok(()),
+        WatcherStart::AlreadyRunning => {
+            if let Err(err) = sync_after_event(paths, options.force) {
+                eprintln!("event sync failed: {err:#}");
+            }
+            Ok(())
+        }
+    }
+}
+
+fn start_watcher(paths: &Paths, options: Options) -> Result<WatcherStart> {
     if let Some(pid) = read_pid(&paths.pid_file)? {
         if process_alive(pid) {
             if !options.quiet {
                 println!("tab title watcher already running: pid {pid}");
             }
-            return Ok(());
+            return Ok(WatcherStart::AlreadyRunning);
         }
         remove_if_exists(&paths.pid_file)?;
     }
@@ -246,7 +269,7 @@ fn start_watcher(paths: &Paths, options: Options) -> Result<()> {
         if !options.quiet {
             println!("tab title watcher already starting");
         }
-        return Ok(());
+        return Ok(WatcherStart::AlreadyStarting);
     };
 
     if let Some(pid) = read_pid(&paths.pid_file)? {
@@ -254,7 +277,7 @@ fn start_watcher(paths: &Paths, options: Options) -> Result<()> {
             if !options.quiet {
                 println!("tab title watcher already running: pid {pid}");
             }
-            return Ok(());
+            return Ok(WatcherStart::AlreadyRunning);
         }
         remove_if_exists(&paths.pid_file)?;
     }
@@ -293,13 +316,12 @@ fn start_watcher(paths: &Paths, options: Options) -> Result<()> {
             paths.state_dir.display()
         );
     }
-    Ok(())
+    Ok(WatcherStart::Started)
 }
 
 fn watch_loop(paths: &Paths, options: Options) -> Result<()> {
     let pid = std::process::id();
     write_pid(&paths.pid_file, pid)?;
-    let mut state = load_label_state(paths)?;
     let mut config_cache = ConfigCache::new(paths)?;
     loop {
         if !process_owns_pid_file(paths, pid)? {
@@ -309,13 +331,13 @@ fn watch_loop(paths: &Paths, options: Options) -> Result<()> {
         let config = config_cache.load()?;
         let interval = effective_interval(&options, &config);
         let started = Instant::now();
-        let previous_state = state.clone();
-        match sync_once(&config, &mut state, options.force) {
-            Ok(_) => {
-                if let Err(err) = save_label_state_if_changed(paths, &previous_state, &state) {
-                    eprintln!("failed to save label state: {err:#}");
+        match SyncLock::acquire(paths, Duration::ZERO) {
+            Ok(Some(_guard)) => {
+                if let Err(err) = sync_now_with_config(paths, &config, options.force) {
+                    eprintln!("sync failed: {err:#}");
                 }
             }
+            Ok(None) => {}
             Err(err) => eprintln!("sync failed: {err:#}"),
         }
         let elapsed = started.elapsed();
@@ -366,6 +388,7 @@ fn status(paths: &Paths) -> Result<()> {
         "pid": pid,
         "managed_tabs": state.labels.len(),
         "interval_seconds": config.interval_seconds,
+        "event_debounce_ms": EVENT_SYNC_DEBOUNCE_MS,
         "directory_depth": config.directory_depth,
         "show_tab_number": config.show_tab_number,
         "config_dir": paths.config_dir,
@@ -882,6 +905,51 @@ fn save_label_state_if_changed(
     save_label_state(paths, current)
 }
 
+fn sync_now(paths: &Paths, force: bool) -> Result<usize> {
+    let config = load_plugin_config(paths)?;
+    sync_now_with_config(paths, &config, force)
+}
+
+fn sync_now_with_config(paths: &Paths, config: &PluginConfig, force: bool) -> Result<usize> {
+    let mut state = load_label_state(paths)?;
+    let previous_state = state.clone();
+    let changed = sync_once(config, &mut state, force)?;
+    save_label_state_if_changed(paths, &previous_state, &state)?;
+    Ok(changed)
+}
+
+fn sync_after_event(paths: &Paths, force: bool) -> Result<()> {
+    if event_sync_recent(paths)? {
+        return Ok(());
+    }
+    let Some(_guard) = SyncLock::acquire(paths, Duration::ZERO)? else {
+        return Ok(());
+    };
+    if event_sync_recent(paths)? {
+        return Ok(());
+    }
+    sync_now(paths, force)?;
+    mark_event_sync(paths)
+}
+
+fn event_sync_recent(paths: &Paths) -> Result<bool> {
+    let Some(modified) = file_modified(&paths.event_sync_stamp_file)? else {
+        return Ok(false);
+    };
+    match SystemTime::now().duration_since(modified) {
+        Ok(elapsed) => Ok(elapsed < Duration::from_millis(EVENT_SYNC_DEBOUNCE_MS)),
+        Err(_) => Ok(true),
+    }
+}
+
+fn mark_event_sync(paths: &Paths) -> Result<()> {
+    fs::write(
+        &paths.event_sync_stamp_file,
+        format!("{}\n", std::process::id()),
+    )
+    .with_context(|| format!("write {}", paths.event_sync_stamp_file.display()))
+}
+
 fn process_owns_pid_file(paths: &Paths, pid: u32) -> Result<bool> {
     Ok(read_pid(&paths.pid_file)?.is_some_and(|owner| owner == pid))
 }
@@ -931,6 +999,65 @@ impl Drop for StartLock {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
     }
+}
+
+struct SyncLock {
+    path: PathBuf,
+}
+
+impl SyncLock {
+    fn acquire(paths: &Paths, wait: Duration) -> Result<Option<Self>> {
+        let deadline = Instant::now() + wait;
+        loop {
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&paths.sync_lock_file)
+            {
+                Ok(mut file) => {
+                    writeln!(file, "{}", std::process::id())
+                        .with_context(|| format!("write {}", paths.sync_lock_file.display()))?;
+                    return Ok(Some(Self {
+                        path: paths.sync_lock_file.clone(),
+                    }));
+                }
+                Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+                    remove_stale_sync_lock(&paths.sync_lock_file)?;
+                    if wait.is_zero() || Instant::now() >= deadline {
+                        return Ok(None);
+                    }
+                    thread::sleep(Duration::from_millis(25));
+                }
+                Err(err) => {
+                    return Err(err)
+                        .with_context(|| format!("create {}", paths.sync_lock_file.display()));
+                }
+            }
+        }
+    }
+}
+
+impl Drop for SyncLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn remove_stale_sync_lock(path: &Path) -> Result<()> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).with_context(|| format!("stat {}", path.display())),
+    };
+    let stale = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age > Duration::from_secs(SYNC_LOCK_STALE_SECS));
+    if stale {
+        remove_if_exists(path)?;
+    }
+    Ok(())
 }
 
 fn read_pid(path: &Path) -> Result<Option<u32>> {

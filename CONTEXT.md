@@ -29,8 +29,12 @@ The number of trailing cwd path components used when deriving a tab title from a
 _Avoid_: path length
 
 **Poll Interval**:
-The watcher cadence, in seconds, used to refresh managed tab labels. Longer intervals reduce background Herdr CLI queries; shorter intervals make labels react faster.
+The fallback watcher cadence, in seconds, used to refresh managed tab labels when no Herdr event has caused an immediate sync. Longer intervals reduce background Herdr CLI queries.
 _Avoid_: tick rate
+
+**Event Sync**:
+An immediate managed tab label refresh triggered by Herdr workspace, tab, or pane events. Event syncs are debounced so one UI action does not run multiple full refreshes.
+_Avoid_: fast poll
 
 **Visual Tab Index**:
 The 1-based tab position shown in Herdr's tab bar and used by indexed navigation like prefix+1..9. This is distinct from Herdr's stable public tab number.
