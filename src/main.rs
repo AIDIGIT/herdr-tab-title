@@ -9,9 +9,10 @@ use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
-const DEFAULT_INTERVAL_SECS: u64 = 1;
+const DEFAULT_INTERVAL_SECS: u64 = 10;
+const MAX_INTERVAL_SECS: u64 = 3600;
 const DEFAULT_DIRECTORY_DEPTH: usize = 1;
 const MAX_DIRECTORY_DEPTH: usize = 8;
 const LABEL_LIMIT: usize = 40;
@@ -29,7 +30,7 @@ enum CliCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Options {
-    interval: Duration,
+    interval: Option<Duration>,
     force: bool,
     quiet: bool,
 }
@@ -79,12 +80,14 @@ struct LabelState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PluginConfig {
+    interval_seconds: u64,
     directory_depth: usize,
     show_tab_number: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct RawPluginConfig {
+    interval_seconds: Option<u64>,
     directory_depth: Option<usize>,
     show_tab_number: Option<bool>,
 }
@@ -92,6 +95,7 @@ struct RawPluginConfig {
 impl Default for PluginConfig {
     fn default() -> Self {
         Self {
+            interval_seconds: DEFAULT_INTERVAL_SECS,
             directory_depth: DEFAULT_DIRECTORY_DEPTH,
             show_tab_number: false,
         }
@@ -120,8 +124,10 @@ fn run() -> Result<()> {
         CliCommand::Status => status(&paths),
         CliCommand::Sync(options) => {
             let mut state = load_label_state(&paths)?;
-            let changed = sync_once(&paths, &mut state, options.force)?;
-            save_label_state(&paths, &state)?;
+            let previous_state = state.clone();
+            let config = load_plugin_config(&paths)?;
+            let changed = sync_once(&config, &mut state, options.force)?;
+            save_label_state_if_changed(&paths, &previous_state, &state)?;
             println!("synced {changed} tab(s)");
             Ok(())
         }
@@ -150,7 +156,7 @@ fn parse_args(args: Vec<OsString>) -> Result<CliCommand> {
 }
 
 fn parse_options(args: &[OsString]) -> Result<Options> {
-    let mut interval = Duration::from_secs(DEFAULT_INTERVAL_SECS);
+    let mut interval = None;
     let mut force = false;
     let mut quiet = false;
     let mut index = 0;
@@ -171,7 +177,7 @@ fn parse_options(args: &[OsString]) -> Result<Options> {
                 if seconds == 0 {
                     bail!("--interval-seconds must be greater than zero");
                 }
-                interval = Duration::from_secs(seconds);
+                interval = Some(Duration::from_secs(seconds));
                 index += 2;
             }
             "--force" => {
@@ -264,11 +270,14 @@ fn start_watcher(paths: &Paths, options: Options) -> Result<()> {
     let mut command = Command::new(exe);
     command
         .arg("watch")
-        .arg("--interval-seconds")
-        .arg(options.interval.as_secs().to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(err));
+    if let Some(interval) = options.interval {
+        command
+            .arg("--interval-seconds")
+            .arg(interval.as_secs().to_string());
+    }
     if options.force {
         command.arg("--force");
     }
@@ -291,25 +300,35 @@ fn watch_loop(paths: &Paths, options: Options) -> Result<()> {
     let pid = std::process::id();
     write_pid(&paths.pid_file, pid)?;
     let mut state = load_label_state(paths)?;
+    let mut config_cache = ConfigCache::new(paths)?;
     loop {
         if !process_owns_pid_file(paths, pid)? {
             eprintln!("watcher exiting because another watcher became owner");
             return Ok(());
         }
+        let config = config_cache.load()?;
+        let interval = effective_interval(&options, &config);
         let started = Instant::now();
-        match sync_once(paths, &mut state, options.force) {
+        let previous_state = state.clone();
+        match sync_once(&config, &mut state, options.force) {
             Ok(_) => {
-                if let Err(err) = save_label_state(paths, &state) {
+                if let Err(err) = save_label_state_if_changed(paths, &previous_state, &state) {
                     eprintln!("failed to save label state: {err:#}");
                 }
             }
             Err(err) => eprintln!("sync failed: {err:#}"),
         }
         let elapsed = started.elapsed();
-        if elapsed < options.interval {
-            thread::sleep(options.interval - elapsed);
+        if elapsed < interval {
+            thread::sleep(interval - elapsed);
         }
     }
+}
+
+fn effective_interval(options: &Options, config: &PluginConfig) -> Duration {
+    options
+        .interval
+        .unwrap_or_else(|| Duration::from_secs(config.interval_seconds))
 }
 
 fn stop_watcher(paths: &Paths) -> Result<()> {
@@ -346,6 +365,7 @@ fn status(paths: &Paths) -> Result<()> {
         "running": running,
         "pid": pid,
         "managed_tabs": state.labels.len(),
+        "interval_seconds": config.interval_seconds,
         "directory_depth": config.directory_depth,
         "show_tab_number": config.show_tab_number,
         "config_dir": paths.config_dir,
@@ -357,8 +377,7 @@ fn status(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-fn sync_once(paths: &Paths, state: &mut LabelState, force: bool) -> Result<usize> {
-    let config = load_plugin_config(paths)?;
+fn sync_once(config: &PluginConfig, state: &mut LabelState, force: bool) -> Result<usize> {
     let tabs = list_tabs()?;
     let panes = list_panes()?;
     let panes_by_tab = group_panes_by_tab(panes);
@@ -427,6 +446,9 @@ fn select_tab_source_pane<'a>(tab: &Tab, panes: &'a [Pane]) -> Result<Option<&'a
     let Some(first) = panes.first() else {
         return Ok(None);
     };
+    if panes.len() == 1 {
+        return Ok(Some(first));
+    }
     if let Ok(focused_pane_id) = layout_focused_pane(&first.pane_id) {
         if let Some(pane) = panes.iter().find(|pane| pane.pane_id == focused_pane_id) {
             return Ok(Some(pane));
@@ -771,6 +793,12 @@ fn load_plugin_config(paths: &Paths) -> Result<PluginConfig> {
 fn parse_plugin_config(text: &str) -> Result<PluginConfig> {
     let raw: RawPluginConfig = toml::from_str(text)?;
     let mut config = PluginConfig::default();
+    if let Some(interval_seconds) = raw.interval_seconds {
+        if interval_seconds == 0 || interval_seconds > MAX_INTERVAL_SECS {
+            bail!("interval_seconds must be between 1 and {MAX_INTERVAL_SECS}");
+        }
+        config.interval_seconds = interval_seconds;
+    }
     if let Some(directory_depth) = raw.directory_depth {
         if directory_depth == 0 || directory_depth > MAX_DIRECTORY_DEPTH {
             bail!("directory_depth must be between 1 and {MAX_DIRECTORY_DEPTH}");
@@ -781,6 +809,51 @@ fn parse_plugin_config(text: &str) -> Result<PluginConfig> {
         config.show_tab_number = show_tab_number;
     }
     Ok(config)
+}
+
+struct ConfigCache {
+    path: PathBuf,
+    modified: Option<SystemTime>,
+    config: PluginConfig,
+}
+
+impl ConfigCache {
+    fn new(paths: &Paths) -> Result<Self> {
+        let config = load_plugin_config(paths)?;
+        let modified = file_modified(&paths.config_file)?;
+        Ok(Self {
+            path: paths.config_file.clone(),
+            modified,
+            config,
+        })
+    }
+
+    fn load(&mut self) -> Result<PluginConfig> {
+        let modified = file_modified(&self.path)?;
+        if modified != self.modified {
+            self.config = if self.path.is_file() {
+                let mut text = String::new();
+                File::open(&self.path)
+                    .with_context(|| format!("open {}", self.path.display()))?
+                    .read_to_string(&mut text)
+                    .with_context(|| format!("read {}", self.path.display()))?;
+                parse_plugin_config(&text)
+                    .with_context(|| format!("parse {}", self.path.display()))?
+            } else {
+                PluginConfig::default()
+            };
+            self.modified = modified;
+        }
+        Ok(self.config.clone())
+    }
+}
+
+fn file_modified(path: &Path) -> Result<Option<SystemTime>> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.modified().ok()),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("stat {}", path.display())),
+    }
 }
 
 fn save_label_state(paths: &Paths, state: &LabelState) -> Result<()> {
@@ -796,6 +869,17 @@ fn save_label_state(paths: &Paths, state: &LabelState) -> Result<()> {
     fs::write(&tmp, json).with_context(|| format!("write {}", tmp.display()))?;
     fs::rename(&tmp, &paths.labels_file)
         .with_context(|| format!("replace {}", paths.labels_file.display()))
+}
+
+fn save_label_state_if_changed(
+    paths: &Paths,
+    previous: &LabelState,
+    current: &LabelState,
+) -> Result<()> {
+    if previous == current {
+        return Ok(());
+    }
+    save_label_state(paths, current)
 }
 
 fn process_owns_pid_file(paths: &Paths, pid: u32) -> Result<bool> {
@@ -932,6 +1016,7 @@ mod tests {
 
     #[test]
     fn plugin_config_controls_directory_depth() {
+        assert_eq!(PluginConfig::default().interval_seconds, 10);
         assert_eq!(PluginConfig::default().directory_depth, 1);
         assert!(!PluginConfig::default().show_tab_number);
         assert_eq!(parse_plugin_config("").unwrap().directory_depth, 1);
@@ -946,6 +1031,19 @@ mod tests {
     }
 
     #[test]
+    fn plugin_config_controls_poll_interval() {
+        assert_eq!(parse_plugin_config("").unwrap().interval_seconds, 10);
+        assert_eq!(
+            parse_plugin_config("interval_seconds = 30")
+                .unwrap()
+                .interval_seconds,
+            30
+        );
+        assert!(parse_plugin_config("interval_seconds = 0").is_err());
+        assert!(parse_plugin_config("interval_seconds = 3601").is_err());
+    }
+
+    #[test]
     fn plugin_config_controls_tab_number_prefix() {
         assert!(
             parse_plugin_config("show_tab_number = true")
@@ -957,6 +1055,7 @@ mod tests {
                 3,
                 "me/project",
                 &PluginConfig {
+                    interval_seconds: 10,
                     directory_depth: 2,
                     show_tab_number: true,
                 },
@@ -968,6 +1067,7 @@ mod tests {
                 3,
                 "me/project",
                 &PluginConfig {
+                    interval_seconds: 10,
                     directory_depth: 2,
                     show_tab_number: false,
                 },
@@ -982,6 +1082,7 @@ mod tests {
     #[test]
     fn manual_titles_keep_text_but_get_visual_tab_number() {
         let config = PluginConfig {
+            interval_seconds: 10,
             directory_depth: 2,
             show_tab_number: true,
         };

@@ -41,9 +41,14 @@ herdr plugin config-dir aarsh21.tab-title
 Create or edit `config.toml` there:
 
 ```toml
+interval_seconds = 10
 directory_depth = 2
 show_tab_number = true
 ```
+
+`interval_seconds` controls how often the watcher refreshes tab titles. The
+default is `10`, which keeps the plugin lightweight for normal use. Lower values
+make titles react faster but run more Herdr CLI queries.
 
 `directory_depth` controls how many trailing path components are shown when a
 pane is sitting at an idle shell. The default is `1`, so `/home/me/api` displays
@@ -63,8 +68,8 @@ herdr plugin action invoke aarsh21.tab-title.status
 herdr plugin action invoke aarsh21.tab-title.sync
 ```
 
-The watcher refreshes titles every second. It also self-starts from normal
-workspace, tab, and pane events after the plugin has been installed.
+The watcher refreshes titles every `interval_seconds`. It also self-starts from
+normal workspace, tab, and pane events after the plugin has been installed.
 
 ## Manual Tab Names
 

@@ -28,6 +28,10 @@ _Avoid_: custom name
 The number of trailing cwd path components used when deriving a tab title from an idle shell. A depth of 1 uses only the leaf directory; a depth of 2 uses parent/leaf.
 _Avoid_: path length
 
+**Poll Interval**:
+The watcher cadence, in seconds, used to refresh managed tab labels. Longer intervals reduce background Herdr CLI queries; shorter intervals make labels react faster.
+_Avoid_: tick rate
+
 **Visual Tab Index**:
 The 1-based tab position shown in Herdr's tab bar and used by indexed navigation like prefix+1..9. This is distinct from Herdr's stable public tab number.
 _Avoid_: public tab number
