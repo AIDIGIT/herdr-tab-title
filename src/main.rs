@@ -500,19 +500,34 @@ fn desired_label_for_manual_tab(tab: &Tab, config: &PluginConfig) -> Option<Stri
 
 fn desired_label_for_pane(pane: &Pane, config: &PluginConfig) -> Result<String> {
     let processes = pane_process_info(&pane.pane_id)?;
-    if let Some(process) = select_foreground_process(&processes) {
-        return Ok(sanitize_label(&process_label(process)));
-    }
-
     let cwd = pane
         .foreground_cwd
         .as_deref()
         .or(pane.cwd.as_deref())
         .unwrap_or("/");
-    Ok(sanitize_label(&directory_label(
+    let command = select_foreground_process(&processes)
+        .map(process_label)
+        .unwrap_or_else(current_shell_label);
+    Ok(command_directory_label(
+        &command,
         cwd,
         config.directory_depth,
-    )))
+    ))
+}
+
+fn current_shell_label() -> String {
+    env::var_os("SHELL")
+        .and_then(|shell| Path::new(&shell).file_name().map(OsString::from))
+        .and_then(|name| name.into_string().ok())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "shell".to_string())
+}
+
+fn command_directory_label(command: &str, cwd: &str, directory_depth: usize) -> String {
+    sanitize_label(&format!(
+        "{command} {}",
+        directory_label(cwd, directory_depth)
+    ))
 }
 
 fn format_tab_label(display_number: usize, base_label: &str, config: &PluginConfig) -> String {
@@ -1139,6 +1154,18 @@ mod tests {
         assert_eq!(directory_label("/home/me/project", 2), "me/project");
         assert_eq!(directory_label("/home/me/project", 99), "home/me/project");
         assert_eq!(directory_label("C:\\Users\\me\\project", 2), "me/project");
+    }
+
+    #[test]
+    fn command_directory_label_combines_command_and_directory() {
+        assert_eq!(
+            command_directory_label("nvim", "/home/me/project", 1),
+            "nvim project"
+        );
+        assert_eq!(
+            command_directory_label("zsh", "/home/me/project", 2),
+            "zsh me/project"
+        );
     }
 
     #[test]

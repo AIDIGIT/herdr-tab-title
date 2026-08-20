@@ -2,82 +2,82 @@ id = "aarsh21.tab-title"
 name = "Tab Title"
 version = "0.1.6"
 min_herdr_version = "0.7.3"
-description = "Automatic tmux-like Herdr tab titles from the focused pane's process or directory"
+description = "Automatic tmux-like Herdr tab titles from the focused pane's process and directory"
 platforms = ["linux", "macos"]
 
 [[build]]
-command = ["sh", "scripts/install-binary.sh"]
+command = ["cargo", "build", "--release"]
 platforms = ["linux", "macos"]
 
 [[actions]]
 id = "start"
 title = "Start tab title watcher"
 contexts = ["workspace"]
-command = ["bin/herdr-tab-title", "start"]
+command = ["target/release/herdr-tab-title", "start"]
 platforms = ["linux", "macos"]
 
 [[actions]]
 id = "stop"
 title = "Stop tab title watcher"
 contexts = ["workspace"]
-command = ["bin/herdr-tab-title", "stop"]
+command = ["target/release/herdr-tab-title", "stop"]
 platforms = ["linux", "macos"]
 
 [[actions]]
 id = "status"
 title = "Show tab title watcher status"
 contexts = ["workspace"]
-command = ["bin/herdr-tab-title", "status"]
+command = ["target/release/herdr-tab-title", "status"]
 platforms = ["linux", "macos"]
 
 [[actions]]
 id = "sync"
 title = "Sync tab titles once"
 contexts = ["workspace"]
-command = ["bin/herdr-tab-title", "sync"]
+command = ["target/release/herdr-tab-title", "sync"]
 platforms = ["linux", "macos"]
 
 [[events]]
 on = "workspace.created"
-command = ["bin/herdr-tab-title", "autostart"]
+command = ["target/release/herdr-tab-title", "autostart"]
 platforms = ["linux", "macos"]
 
 [[events]]
 on = "workspace.focused"
-command = ["bin/herdr-tab-title", "autostart"]
+command = ["target/release/herdr-tab-title", "autostart"]
 platforms = ["linux", "macos"]
 
 [[events]]
 on = "tab.created"
-command = ["bin/herdr-tab-title", "autostart"]
+command = ["target/release/herdr-tab-title", "autostart"]
 platforms = ["linux", "macos"]
 
 [[events]]
 on = "tab.focused"
-command = ["bin/herdr-tab-title", "autostart"]
+command = ["target/release/herdr-tab-title", "autostart"]
 platforms = ["linux", "macos"]
 
 [[events]]
 on = "tab.moved"
-command = ["bin/herdr-tab-title", "autostart"]
+command = ["target/release/herdr-tab-title", "autostart"]
 platforms = ["linux", "macos"]
 
 [[events]]
 on = "pane.created"
-command = ["bin/herdr-tab-title", "autostart"]
+command = ["target/release/herdr-tab-title", "autostart"]
 platforms = ["linux", "macos"]
 
 [[events]]
 on = "pane.focused"
-command = ["bin/herdr-tab-title", "autostart"]
+command = ["target/release/herdr-tab-title", "autostart"]
 platforms = ["linux", "macos"]
 
 [[events]]
 on = "pane.moved"
-command = ["bin/herdr-tab-title", "autostart"]
+command = ["target/release/herdr-tab-title", "autostart"]
 platforms = ["linux", "macos"]
 
 [[events]]
 on = "pane.exited"
-command = ["bin/herdr-tab-title", "autostart"]
+command = ["target/release/herdr-tab-title", "autostart"]
 platforms = ["linux", "macos"]
