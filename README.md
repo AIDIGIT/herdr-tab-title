@@ -4,8 +4,8 @@ Automatic tmux-like tab titles for [Herdr](https://herdr.dev).
 
 This plugin keeps Herdr tab labels in sync with the focused pane in each tab:
 
-- foreground program running: `vim`, `cargo`, `node`
-- idle shell: current directory basename, such as `herdr` or `api`
+- foreground program and directory: `vim herdr`, `cargo api`, `node web`
+- idle shell and directory: `zsh herdr`, `fish api`
 
 It uses only public Herdr plugin and CLI APIs. It does not patch Herdr.
 
@@ -50,10 +50,10 @@ show_tab_number = true
 events trigger an immediate debounced sync, so titles update without waiting for
 the next poll. The default fallback is `10` seconds.
 
-`directory_depth` controls how many trailing path components are shown when a
-pane is sitting at an idle shell. The default is `1`, so `/home/me/api` displays
-as `api`; `2` displays it as `me/api`. Foreground programs still win, so a pane
-running `vim` or `cargo` is titled `vim` or `cargo`.
+`directory_depth` controls how many trailing path components are shown. The
+default is `1`, so a shell in `/home/me/api` displays as `zsh api`; `2` displays
+it as `zsh me/api`. Foreground programs still win, so running `vim` there is
+titled `vim api`.
 
 `show_tab_number` prefixes tab titles with the visual tab index used by
 `prefix+1..9`, such as `1:me/api`. Manual titles keep their text and get the
@@ -70,7 +70,8 @@ herdr plugin action invoke aarsh21.tab-title.sync
 
 The watcher refreshes titles immediately from normal workspace, tab, and pane
 events, with a 250ms debounce for event bursts. It also runs a fallback refresh
-every `interval_seconds`.
+every `interval_seconds`. Watcher and label state is isolated per named Herdr
+session, so multiple sessions can update independently.
 
 ## Manual Tab Names
 
