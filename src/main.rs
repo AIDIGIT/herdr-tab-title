@@ -211,9 +211,21 @@ fn print_help() {
 
 impl Paths {
     fn new() -> Result<Self> {
-        let state_dir = env::var_os("HERDR_PLUGIN_STATE_DIR")
+        let state_root = env::var_os("HERDR_PLUGIN_STATE_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(".herdr-tab-title-state"));
+        let session = env::var("HERDR_SESSION").unwrap_or_else(|_| "default".to_string());
+        let session = session
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        let state_dir = state_root.join("sessions").join(session);
         let config_dir = env::var_os("HERDR_PLUGIN_CONFIG_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| state_dir.join("config"));
@@ -506,6 +518,7 @@ fn desired_label_for_pane(pane: &Pane, config: &PluginConfig) -> Result<String> 
         .or(pane.cwd.as_deref())
         .unwrap_or("/");
     let command = select_foreground_process(&processes)
+        .or_else(|| processes.iter().find(|process| is_shell_process(process)))
         .map(process_label)
         .unwrap_or_else(current_shell_label);
     Ok(command_directory_label(
@@ -1290,6 +1303,15 @@ mod tests {
             select_foreground_process(&processes).map(process_label),
             Some("cargo".to_string())
         );
+    }
+
+    #[test]
+    fn detected_shell_is_available_for_idle_tab_labels() {
+        let processes = [process("zsh", None, &["zsh"])];
+        let command = select_foreground_process(&processes)
+            .or_else(|| processes.iter().find(|process| is_shell_process(process)))
+            .map(process_label);
+        assert_eq!(command, Some("zsh".to_string()));
     }
 
     #[test]
